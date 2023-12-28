@@ -3,3 +3,4 @@ venv/
 datasets/
 *.pt
 *.gif
+*.onnx
