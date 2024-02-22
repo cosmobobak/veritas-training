@@ -1,6 +1,7 @@
 venv/
 .vscode
-datasets/
+datasets/*
 *.pt
 *.gif
 *.onnx
+plots/*

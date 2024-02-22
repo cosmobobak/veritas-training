@@ -1,4 +1,5 @@
 # %%
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -13,6 +14,9 @@ BOARD_SIDE_LEN = int(input("Enter the board size (side length, likely 9, 13, 15,
 DATASET_PATH = input("Enter the path to the dataset: ")
 RUN_ID = input(f"Enter the run ID: gomoku{BOARD_SIDE_LEN}x{BOARD_SIDE_LEN}-")
 RUN_ID = f"gomoku{BOARD_SIDE_LEN}x{BOARD_SIDE_LEN}-" + RUN_ID
+
+# mkdir plots/{RUN_ID}
+os.makedirs(f"plots/{RUN_ID}", exist_ok=True)
 
 positions       = np.loadtxt(f"{DATASET_PATH}/positions.csv", delimiter=",")
 rollout_counts  = np.loadtxt(f"{DATASET_PATH}/policy-target.csv", delimiter=",")
@@ -107,6 +111,9 @@ for i in range(5):
 # remove the gridlines
 for ax in axs.flatten():
     ax.grid(False)
+
+# save to plots directory
+fig.savefig(f"plots/{RUN_ID}/sample_data.png")
 
 # %%
 
@@ -252,49 +259,58 @@ loss_trace, val_loss_trace = train(model, optimizer, train_loader, val_loader, e
 # plot the loss trace and validation loss trace
 loss_trace = np.array(loss_trace)
 val_loss_trace = np.array(val_loss_trace)
-plt.plot(loss_trace[:, 0], loss_trace[:, 1])
-plt.plot(val_loss_trace[:, 0], val_loss_trace[:, 1])
-plt.xlabel("Batch")
-plt.ylabel("Loss")
-plt.legend(["Training loss", "Validation loss"])
-plt.show()
+fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+ax.plot(loss_trace[:, 0], loss_trace[:, 1])
+ax.plot(val_loss_trace[:, 0], val_loss_trace[:, 1])
+# add the training loss trace smoothed
+smoothed = np.convolve(loss_trace[:, 1], np.ones(1000)/1000, mode="valid")
+ax.plot(loss_trace[500:-499, 0], smoothed)
+# add dots to the validation loss trace
+sc = ax.scatter(val_loss_trace[:, 0], val_loss_trace[:, 1], c="orange", s=10)
+# bring the dots to the front
+sc.set_zorder(10)
+ax.set_xlabel("Batch")
+ax.set_ylabel("Loss")
+# put the legend in the middle right
+ax.legend(["Training loss", "Validation loss", "Smoothed training loss"], loc="best")
+ax.set_title("Loss")
+fig.savefig(f"plots/{RUN_ID}/loss.png")
 
 # %%
-# plot for policy and value losses particularly
-plt.plot(loss_trace[:, 0], loss_trace[:, 2])
-plt.plot(val_loss_trace[:, 0], val_loss_trace[:, 2])
+fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+ax.plot(loss_trace[:, 0], loss_trace[:, 2])
+ax.plot(val_loss_trace[:, 0], val_loss_trace[:, 2])
 # add the training loss trace smoothed
 smoothed = np.convolve(loss_trace[:, 2], np.ones(1000)/1000, mode="valid")
-plt.plot(loss_trace[500:-499, 0], smoothed)
+ax.plot(loss_trace[500:-499, 0], smoothed)
 # add dots to the validation loss trace
-sc = plt.scatter(val_loss_trace[:, 0], val_loss_trace[:, 2], c="orange", s=10)
+sc = ax.scatter(val_loss_trace[:, 0], val_loss_trace[:, 2], c="orange", s=10)
 # bring the dots to the front
 sc.set_zorder(10)
-plt.xlabel("Batch")
-plt.ylabel("Policy Loss")
+ax.set_xlabel("Batch")
+ax.set_ylabel("Policy Loss")
 # put the legend in the middle right
-plt.legend(["Training policy loss", "Validation policy loss", "Smoothed training policy loss"], loc="best")
-plt.title("Policy Loss")
-plt.savefig(f"plots/{RUN_ID}policy_loss.png")
-plt.show()
+ax.legend(["Training policy loss", "Validation policy loss", "Smoothed training policy loss"], loc="best")
+ax.set_title("Policy Loss")
+fig.savefig(f"plots/{RUN_ID}/policy_loss.png")
 
 # %%
-plt.plot(loss_trace[:, 0], loss_trace[:, 3])
-plt.plot(val_loss_trace[:, 0], val_loss_trace[:, 3])
+fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+ax.plot(loss_trace[:, 0], loss_trace[:, 3])
+ax.plot(val_loss_trace[:, 0], val_loss_trace[:, 3])
 # add the training loss trace smoothed
 smoothed = np.convolve(loss_trace[:, 3], np.ones(1000)/1000, mode="valid")
-plt.plot(loss_trace[500:-499, 0], smoothed)
+ax.plot(loss_trace[500:-499, 0], smoothed)
 # add dots to the validation loss trace
-sc = plt.scatter(val_loss_trace[:, 0], val_loss_trace[:, 3], c="orange", s=10)
+sc = ax.scatter(val_loss_trace[:, 0], val_loss_trace[:, 3], c="orange", s=10)
 # bring the dots to the front
 sc.set_zorder(10)
-plt.xlabel("Batch")
-plt.ylabel("Value Loss")
+ax.set_xlabel("Batch")
+ax.set_ylabel("Value Loss")
 # put the legend in the middle right
-plt.legend(["Training value loss", "Validation value loss", "Smoothed training value loss"], loc="best")
-plt.title("Value Loss")
-plt.savefig(f"plots/{RUN_ID}value_loss.png")
-plt.show()
+ax.legend(["Training value loss", "Validation value loss", "Smoothed training value loss"], loc="best")
+ax.set_title("Value Loss")
+fig.savefig(f"plots/{RUN_ID}/value_loss.png")
 
 # %%
 # save the model
@@ -362,7 +378,7 @@ for ax in axs.flatten():
 
 # %%
 # export model to ONNX
-onnx_model_path = "model.onnx"
+onnx_model_path = f"nets/{RUN_ID}-model.onnx"
 
 # create a dummy input
 dummy_input = tch.randn(1, 162)
@@ -398,7 +414,7 @@ import onnxruntime as ort
 ort_session = ort.InferenceSession(onnx_model_path)
 onnx_net_output = []
 for i in range(len(common_input_data)):
-    input_thing = {'onnx::Reshape_0': common_input_data[i].numpy().reshape(1, 162)}
+    input_thing = {"input": common_input_data[i].numpy().reshape(1, 162)}
     ort_session_out = ort_session.run(None, input_thing)
     policy = ort_session_out[0]
     np_policy = policy.reshape(1, 81)
