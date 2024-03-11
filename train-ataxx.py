@@ -10,12 +10,12 @@ import seaborn as sns
 sns.set_theme()
 
 # %%
-BOARD_SIDE_LEN = int(input("Enter the board size (side length, likely 9, 13, 15, or 19): "))
+BOARD_SIDE_LEN = 7
 DATASET_PATH = input("Enter the path to the dataset: ")
-RUN_ID = input(f"Enter the run ID: gomoku{BOARD_SIDE_LEN}x{BOARD_SIDE_LEN}-")
-RUN_ID = f"gomoku{BOARD_SIDE_LEN}x{BOARD_SIDE_LEN}-" + RUN_ID
-POLICY_DIMENSIONALITY = BOARD_SIDE_LEN * BOARD_SIDE_LEN
-INPUT_CHANNELS = 2 # white + black
+RUN_ID = input(f"Enter the run ID: ataxx{BOARD_SIDE_LEN}x{BOARD_SIDE_LEN}-")
+RUN_ID = f"ataxx{BOARD_SIDE_LEN}x{BOARD_SIDE_LEN}-" + RUN_ID
+POLICY_DIMENSIONALITY = (BOARD_SIDE_LEN * BOARD_SIDE_LEN) ** 2
+INPUT_CHANNELS = 3 # white + black + gaps
 
 # mkdir plots/{RUN_ID}
 os.makedirs(f"plots/{RUN_ID}", exist_ok=True)
@@ -76,7 +76,7 @@ print(f"y_val has dims {y_val.shape}")
 print(f"z_val has dims {z_val.shape}")
 
 # create a dataset class
-class GomokuDataset(tch.utils.data.Dataset):
+class AtaxxDataset(tch.utils.data.Dataset):
     def __init__(self, pos, policy, value):
         self.x = pos
         self.y = policy
@@ -89,8 +89,8 @@ class GomokuDataset(tch.utils.data.Dataset):
         return len(self.x)
 
 # create dataloaders
-train_dataset = GomokuDataset(x_train, y_train, z_train)
-val_dataset = GomokuDataset(x_val, y_val, z_val)
+train_dataset = AtaxxDataset(x_train, y_train, z_train)
+val_dataset = AtaxxDataset(x_val, y_val, z_val)
 train_loader = tch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
 val_loader = tch.utils.data.DataLoader(val_dataset, batch_size=64, shuffle=True)
 
@@ -132,6 +132,7 @@ SQUARES = BOARD_SIDE_LEN * BOARD_SIDE_LEN
 # as we need to reshape the input to be 4-dimensional
 FINAL_CHANNELS = 32
 LATENT_REPR_DIM = FINAL_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN
+ATTENTION_POLICY_VECTOR_LENGTH = 16
 class ConvPolicyModel(tch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -147,9 +148,24 @@ class ConvPolicyModel(tch.nn.Module):
         self.conv6   = tch.nn.Conv2d(32, 32, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
         self.conv7   = tch.nn.Conv2d(32, FINAL_CHANNELS, 3, padding=1) # 16 x SIDE x SIDE -> {FINAL_CHANNELS} x SIDE x SIDE
         self.policy1 = tch.nn.Linear(LATENT_REPR_DIM, LATENT_REPR_DIM)
-        self.policy_tgt = tch.nn.Linear(LATENT_REPR_DIM, BOARD_SIDE_LEN * BOARD_SIDE_LEN)
+        self.policy_src = tch.nn.Linear(LATENT_REPR_DIM, BOARD_SIDE_LEN * BOARD_SIDE_LEN * ATTENTION_POLICY_VECTOR_LENGTH)
+        self.policy_tgt = tch.nn.Linear(LATENT_REPR_DIM, BOARD_SIDE_LEN * BOARD_SIDE_LEN * ATTENTION_POLICY_VECTOR_LENGTH)
         self.value1  = tch.nn.Linear(LATENT_REPR_DIM, 2 * SQUARES)
         self.value2  = tch.nn.Linear(2 * SQUARES, 1)
+
+    @staticmethod
+    def attention_policy_src_tgt_merge(A, B):
+        # Reshape A to [batch_size, n, 1, m]
+        A = A.unsqueeze(2)
+
+        # Reshape B to [batch_size, 1, m, n]
+        B = B.transpose(1, 2).unsqueeze(1)
+
+        # Compute the dot product
+        C = tch.matmul(A, B)
+
+        # view will just obliterate the unit dimension for me
+        return C.view(-1, BOARD_SIDE_LEN * BOARD_SIDE_LEN * BOARD_SIDE_LEN * BOARD_SIDE_LEN)
 
     def forward(self, x):
         x = x.view(-1, INPUT_CHANNELS, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
@@ -164,9 +180,14 @@ class ConvPolicyModel(tch.nn.Module):
         x = self.relu(self.conv7(x)) + x
         # flatten
         latent = x.view(-1, LATENT_REPR_DIM)
-        x = self.relu(self.policy1(latent))
+        x = self.policy1(latent)
+        x = self.relu(x)
 
-        policy_logits = self.policy_tgt(x)
+        src = self.policy_src(x).view(-1, BOARD_SIDE_LEN * BOARD_SIDE_LEN, ATTENTION_POLICY_VECTOR_LENGTH)
+        tgt = self.policy_tgt(x).view(-1, BOARD_SIDE_LEN * BOARD_SIDE_LEN, ATTENTION_POLICY_VECTOR_LENGTH)
+        # to get the policy for a certain source-target pair, we take the dot product of the source vector and the target vector.
+        # this gives us a 7x7x7x7 tensor.
+        policy_logits = self.attention_policy_src_tgt_merge(src, tgt)
 
         # run the value head
         x = self.value1(latent)
@@ -207,6 +228,34 @@ def clean_model_prediction(model_prediction, board):
     model_prediction = mask_illegal_moves(model_prediction, board)
     model_prediction = model_prediction * POLICY_SOFTMAX_TEMP
     return model_prediction
+
+def decompose_model_prediction(model_prediction):
+    # takes the 7x7x7x7 element model prediction and gives a from-map and a to-map, each of which are only 7x7
+    # the from-map is the probability of a piece moving from that square
+    # the to-map is the probability of a piece moving to that square
+    # with a special case for the "no move" square
+    src_map = np.zeros((BOARD_SIDE_LEN, BOARD_SIDE_LEN))
+    tgt_map = np.zeros((BOARD_SIDE_LEN, BOARD_SIDE_LEN))
+    for i, e in enumerate(model_prediction):
+        src = i // (BOARD_SIDE_LEN * BOARD_SIDE_LEN)
+        tgt = i % (BOARD_SIDE_LEN * BOARD_SIDE_LEN)
+        src_map[src // BOARD_SIDE_LEN, src % BOARD_SIDE_LEN] += e
+        tgt_map[tgt // BOARD_SIDE_LEN, tgt % BOARD_SIDE_LEN] += e
+    # normalise the maps
+    src_map /= src_map.sum()
+    tgt_map /= tgt_map.sum()
+    return src_map, tgt_map
+
+def decompose_model_prediction_batch(model_prediction):
+    # takes a batch of 7x7x7x7 element model predictions and gives a batch of from-maps and a batch of to-maps, each of which are only 7x7
+    # so input is (batch, 7*7*7*7) and output is (batch, 7, 7), (batch, 7, 7)
+    src_maps = np.zeros((model_prediction.shape[0], BOARD_SIDE_LEN, BOARD_SIDE_LEN))
+    tgt_maps = np.zeros((model_prediction.shape[0], BOARD_SIDE_LEN, BOARD_SIDE_LEN))
+    for i, e in enumerate(model_prediction):
+        src_map, tgt_map = decompose_model_prediction(e)
+        src_maps[i] = src_map
+        tgt_maps[i] = tgt_map
+    return src_maps, tgt_maps
 
 # create a training loop
 def train(model, optimizer, train_loader, val_loader, epochs=20, device="cpu"):
@@ -339,43 +388,70 @@ y_pred = clean_model_prediction(y_pred_raw, x_sample)
 # apply softmax to get a probability distribution
 y_pred = tch.nn.functional.softmax(y_pred, dim=1)
 
-x_sample_re = x_sample.reshape(-1, 2, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
-y_sample_re = y_sample.reshape(-1, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
-y_pred_re = y_pred.detach().numpy().reshape(-1, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
+x_sample_re = x_sample.reshape(-1, INPUT_CHANNELS, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
+y_sample_re_src, y_sample_re_tgt = decompose_model_prediction_batch(y_sample)
+y_pred_re_src, y_pred_re_tgt = decompose_model_prediction_batch(y_pred.detach().numpy())
 
 # %%
 # plot the results
 # the first column is the board state
 # the second column is the search policy
 # the third column is the neural network policy
-fig, axs = plt.subplots(N_SAMPLES, 3, figsize=(7, int(math.ceil(13 / 5 * N_SAMPLES))))
+fig, axs = plt.subplots(N_SAMPLES, 5, figsize=(int(math.ceil(7 / 3 * 5)), int(math.ceil(13 / 5 * N_SAMPLES))))
 # label the columns
 axs[0, 0].set_title("Board state")
-axs[0, 1].set_title("Search policy")
-axs[0, 2].set_title("Neural network policy")
+axs[0, 1].set_title("Search policy source")
+axs[0, 2].set_title("Search policy target")
+axs[0, 3].set_title("Neural network policy source")
+axs[0, 4].set_title("Neural network policy target")
+# make the column titles slanted
+for ax in axs[0]:
+    ax.title.set_fontsize(8)
+    ax.title.set_fontstyle("italic")
+    ax.title.set_rotation(45)
+    ax.title.set_position((0.5, 0.5))
+    ax.title.set_verticalalignment("bottom")
+    ax.title.set_horizontalalignment("center")
+
 for i in range(N_SAMPLES):
     board_one = x_sample_re[i][0]
     board_two = x_sample_re[i][1]
-    search = y_sample_re[i]
-    nn = y_pred_re[i]
+    # search = y_sample_re[i]
+    search_src = y_sample_re_src[i]
+    search_tgt = y_sample_re_tgt[i]
+    # nn = y_pred_re[i]
+    nn_src = y_pred_re_src[i]
+    nn_tgt = y_pred_re_tgt[i]
     # pieces_on_first_board = board_one.flatten().sum()
     # pieces_on_second_board = board_two.flatten().sum()
     # x_to_move = pieces_on_first_board != pieces_on_second_board
     # if not x_to_move:
     #     board_one, board_two = board_two, board_one
     board = np.stack([board_one, np.zeros((BOARD_SIDE_LEN, BOARD_SIDE_LEN)), board_two], axis=2) / 1.5
-    search_policy_board = np.stack([search, search, search], axis=2)
-    nn_policy_board = np.stack([nn, nn, nn], axis=2)
+    # search_policy_board = np.stack([search, search, search], axis=2)
+    search_policy_board_src = np.stack([search_src, search_src, search_src], axis=2)
+    search_policy_board_tgt = np.stack([search_tgt, search_tgt, search_tgt], axis=2)
+    # nn_policy_board = np.stack([nn, nn, nn], axis=2)
+    nn_policy_board_src = np.stack([nn_src, nn_src, nn_src], axis=2)
+    nn_policy_board_tgt = np.stack([nn_tgt, nn_tgt, nn_tgt], axis=2)
 
     # renormalise the policies so that the max prediction is 1.0
-    search_policy_board *= 1.0 / search_policy_board.max()
-    nn_policy_board *= 1.0 / nn_policy_board.max()
+    # search_policy_board *= 1.0 / search_policy_board.max()
+    search_policy_board_src *= 1.0 / search_policy_board_src.max()
+    search_policy_board_tgt *= 1.0 / search_policy_board_tgt.max()
+    # nn_policy_board *= 1.0 / nn_policy_board.max()
+    nn_policy_board_src *= 1.0 / nn_policy_board_src.max()
+    nn_policy_board_tgt *= 1.0 / nn_policy_board_tgt.max()
 
-    search_policy_board += board
-    nn_policy_board += board
+    search_policy_board_src += board
+    search_policy_board_tgt += board
+    nn_policy_board_src += board
+    nn_policy_board_tgt += board
     axs[i, 0].imshow(board, vmin=0, vmax=255, cmap="inferno")
-    axs[i, 1].imshow(search_policy_board, vmin=0, vmax=255)
-    axs[i, 2].imshow(nn_policy_board, vmin=0, vmax=255)
+    axs[i, 1].imshow(search_policy_board_src, vmin=0, vmax=255)
+    axs[i, 2].imshow(search_policy_board_tgt, vmin=0, vmax=255)
+    axs[i, 3].imshow(nn_policy_board_src, vmin=0, vmax=255)
+    axs[i, 4].imshow(nn_policy_board_tgt, vmin=0, vmax=255)
 
 # set gridlines to 1x1
 for ax in axs.flatten():

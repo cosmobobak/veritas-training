@@ -14,19 +14,13 @@ BOARD_SIDE_LEN = int(input("Enter the board size (side length, likely 9, 13, 15,
 DATASET_PATH = input("Enter the path to the dataset: ")
 RUN_ID = input(f"Enter the run ID: gomoku{BOARD_SIDE_LEN}x{BOARD_SIDE_LEN}-")
 RUN_ID = f"gomoku{BOARD_SIDE_LEN}x{BOARD_SIDE_LEN}-" + RUN_ID
-POLICY_DIMENSIONALITY = BOARD_SIDE_LEN * BOARD_SIDE_LEN
-INPUT_CHANNELS = 2 # white + black
 
 # mkdir plots/{RUN_ID}
 os.makedirs(f"plots/{RUN_ID}", exist_ok=True)
 
-ROW_LIMIT = 550_000
-
-print(f"Loading dataset from {DATASET_PATH}...")
-positions       = np.loadtxt(f"{DATASET_PATH}/positions.csv", delimiter=",", max_rows=ROW_LIMIT)
-# load rollout counts as float16
-rollout_counts  = np.loadtxt(f"{DATASET_PATH}/policy-target.csv", delimiter=",", max_rows=ROW_LIMIT, dtype=np.float16)
-results         = np.loadtxt(f"{DATASET_PATH}/value-target.csv", delimiter=",", max_rows=ROW_LIMIT)
+positions       = np.loadtxt(f"{DATASET_PATH}/positions.csv", delimiter=",")
+rollout_counts  = np.loadtxt(f"{DATASET_PATH}/policy-target.csv", delimiter=",")
+results         = np.loadtxt(f"{DATASET_PATH}/value-target.csv", delimiter=",")
 
 print(f"{len(positions)} datapoints loaded!")
 assert len(positions) == len(rollout_counts)
@@ -54,8 +48,6 @@ perm_train = np.random.permutation(len(x_train))
 x_train = x_train[perm_train]
 y_train = y_train[perm_train]
 z_train = z_train[perm_train]
-# do this in-place to save memory
-
 perm_val = np.random.permutation(len(x_val))
 x_val = x_val[perm_val]
 y_val = y_val[perm_val]
@@ -95,8 +87,8 @@ train_loader = tch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=T
 val_loader = tch.utils.data.DataLoader(val_dataset, batch_size=64, shuffle=True)
 
 # %%
-x_shaped = x_train.reshape(-1, INPUT_CHANNELS, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
-y_shaped = y_train.reshape(-1, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
+x_shaped = x_train.reshape(-1, 2, 9, 9)
+y_shaped = y_train.reshape(-1, 9, 9)
 
 # show some sample data
 fig, axs = plt.subplots(5, 4, figsize=(12, 10))
@@ -130,8 +122,6 @@ SQUARES = BOARD_SIDE_LEN * BOARD_SIDE_LEN
 # define a convolutional model
 # this is ever so slightly more complicated than the previous model
 # as we need to reshape the input to be 4-dimensional
-FINAL_CHANNELS = 32
-LATENT_REPR_DIM = FINAL_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN
 class ConvPolicyModel(tch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -139,36 +129,30 @@ class ConvPolicyModel(tch.nn.Module):
         self.sigmoid = tch.nn.Sigmoid()
         # five layers of 3x3 convs mean that information can travel at most five squares away.
         # this is maybe fine idk
-        self.conv1   = tch.nn.Conv2d(INPUT_CHANNELS, 32, 3, padding=1) # INPUT_CHANNELS x SIDE x SIDE -> 64 x SIDE x SIDE
-        self.conv2   = tch.nn.Conv2d(32, 32, 3, padding=1) # 64 x SIDE x SIDE -> 64 x SIDE x SIDE
-        self.conv3   = tch.nn.Conv2d(32, 32, 3, padding=1) # 64 x SIDE x SIDE -> 32 x SIDE x SIDE
-        self.conv4   = tch.nn.Conv2d(32, 32, 3, padding=1) # 32 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv5   = tch.nn.Conv2d(32, 32, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv6   = tch.nn.Conv2d(32, 32, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv7   = tch.nn.Conv2d(32, FINAL_CHANNELS, 3, padding=1) # 16 x SIDE x SIDE -> {FINAL_CHANNELS} x SIDE x SIDE
-        self.policy1 = tch.nn.Linear(LATENT_REPR_DIM, LATENT_REPR_DIM)
-        self.policy_tgt = tch.nn.Linear(LATENT_REPR_DIM, BOARD_SIDE_LEN * BOARD_SIDE_LEN)
-        self.value1  = tch.nn.Linear(LATENT_REPR_DIM, 2 * SQUARES)
+        self.conv1   = tch.nn.Conv2d(2, 64, 3, padding=1) # 2 x SIDE x SIDE -> 64 x SIDE x SIDE
+        self.conv2   = tch.nn.Conv2d(64, 64, 3, padding=1) # 64 x SIDE x SIDE -> 64 x SIDE x SIDE
+        self.conv3   = tch.nn.Conv2d(64, 32, 3, padding=1) # 64 x SIDE x SIDE -> 32 x SIDE x SIDE
+        self.conv4   = tch.nn.Conv2d(32, 16, 3, padding=1) # 32 x SIDE x SIDE -> 16 x SIDE x SIDE
+        self.conv5   = tch.nn.Conv2d(16, 2, 3, padding=1) # 8 x SIDE x SIDE -> 2 x SIDE x SIDE
+        self.policy1 = tch.nn.Linear(2 * SQUARES, 2 * SQUARES)
+        self.policy2 = tch.nn.Linear(2 * SQUARES, SQUARES)
+        self.value1  = tch.nn.Linear(2 * SQUARES, 2 * SQUARES)
         self.value2  = tch.nn.Linear(2 * SQUARES, 1)
 
     def forward(self, x):
-        x = x.view(-1, INPUT_CHANNELS, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
-        x = self.relu(self.conv1(x))
-        # conv2 through conv7 have equal I/O dimensions,
-        # so we can make them residual.
-        x = self.relu(self.conv2(x)) + x
-        x = self.relu(self.conv3(x)) + x
-        x = self.relu(self.conv4(x)) + x
-        x = self.relu(self.conv5(x)) + x
-        x = self.relu(self.conv6(x)) + x
-        x = self.relu(self.conv7(x)) + x
+        x = x.view(-1, 2, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
+        x = self.conv1(x)
+        x = self.relu(x)
+        x = self.relu(self.conv2(x))
+        x = self.relu(self.conv3(x))
+        x = self.relu(self.conv4(x))
+        x = self.conv5(x)
+        x = self.relu(x)
         # flatten
-        latent = x.view(-1, LATENT_REPR_DIM)
-        x = self.relu(self.policy1(latent))
-
-        policy_logits = self.policy_tgt(x)
-
-        # run the value head
+        latent = x.view(-1, 2 * SQUARES)
+        x = self.policy1(latent)
+        x = self.relu(x)
+        policy_logits = self.policy2(x)
         x = self.value1(latent)
         x = self.relu(x)
         x = self.value2(x)
@@ -179,8 +163,8 @@ class SimpleNet(tch.nn.Module):
     def __init__(self):
         super().__init__()
         self.sigmoid = tch.nn.Sigmoid()
-        self.policy  = tch.nn.Linear(INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN, POLICY_DIMENSIONALITY)
-        self.value   = tch.nn.Linear(INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN, 1)
+        self.policy  = tch.nn.Linear(2 * SQUARES, SQUARES)
+        self.value   = tch.nn.Linear(2 * SQUARES, 1)
 
     def forward(self, x):
         policy_logits = self.policy(x)
@@ -191,7 +175,7 @@ class SimpleNet(tch.nn.Module):
 # %%
 # create the model and optimizer
 model = ConvPolicyModel()
-optimizer = tch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.1)
+optimizer = tch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.05)
 
 # create a loss function to match the probability distribution
 def loss_fn(prediction_logits, target_distribution):
@@ -199,7 +183,17 @@ def loss_fn(prediction_logits, target_distribution):
 
 # create a function for masking off illegal moves
 def mask_illegal_moves(model_prediction, board):
-    # we just no-op because we don't have ataxx movegen in python atm
+    # return model_prediction
+    # model_prediction is an 81-element vector of probabilities
+    # board is a 81 * 2 = 162-element vector of occupancies
+    # we need to set all illegal moves to 0,
+    # and then renormalize the probabilities
+    # so that they sum to 1 again
+    # first, get a mask of all illegal moves
+    illegal_moves = board[:, :81] + board[:, 81:]
+    # now set all illegal moves to 0
+    model_prediction = tch.where(illegal_moves != 0, tch.zeros_like(model_prediction), model_prediction)
+
     return model_prediction
 
 POLICY_SOFTMAX_TEMP = 1.3
@@ -223,9 +217,8 @@ def train(model, optimizer, train_loader, val_loader, epochs=20, device="cpu"):
             masked_policy = clean_model_prediction(raw_policy, board_state)
             policy_loss = loss_fn(masked_policy, search_policy)
             value_loss = tch.nn.functional.mse_loss(value.view(-1), game_outcome)
-            loss = policy_loss + value_loss
+            loss = policy_loss * 10 + value_loss
             loss.backward()
-            tch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
             policy_loss_value = policy_loss.item()
             value_loss_value = value_loss.item()
@@ -280,7 +273,7 @@ ax.set_xlabel("Batch")
 ax.set_ylabel("Loss")
 # put the legend in the middle right
 ax.legend(["Training loss", "Validation loss", "Smoothed training loss"], loc="best")
-ax.set_title(f"Loss for {RUN_ID}")
+ax.set_title("Loss")
 fig.savefig(f"plots/{RUN_ID}/loss.png")
 
 # %%
@@ -298,7 +291,7 @@ ax.set_xlabel("Batch")
 ax.set_ylabel("Policy Loss")
 # put the legend in the middle right
 ax.legend(["Training policy loss", "Validation policy loss", "Smoothed training policy loss"], loc="best")
-ax.set_title(f"Policy Loss for {RUN_ID}")
+ax.set_title("Policy Loss")
 fig.savefig(f"plots/{RUN_ID}/policy_loss.png")
 
 # %%
@@ -308,8 +301,6 @@ ax.plot(val_loss_trace[:, 0], val_loss_trace[:, 3])
 # add the training loss trace smoothed
 smoothed = np.convolve(loss_trace[:, 3], np.ones(1000)/1000, mode="valid")
 ax.plot(loss_trace[500:-499, 0], smoothed)
-# add a horizontal line at 0.25, marked "random guessing"
-rg = ax.axhline(0.25, color="red", linestyle="--")
 # add dots to the validation loss trace
 sc = ax.scatter(val_loss_trace[:, 0], val_loss_trace[:, 3], c="orange", s=10)
 # bring the dots to the front
@@ -317,8 +308,8 @@ sc.set_zorder(10)
 ax.set_xlabel("Batch")
 ax.set_ylabel("Value Loss")
 # put the legend in the middle right
-ax.legend(["Training value loss", "Validation value loss", "Smoothed training value loss", "Random Guessing"], loc="best")
-ax.set_title(f"Value Loss for {RUN_ID}")
+ax.legend(["Training value loss", "Validation value loss", "Smoothed training value loss"], loc="best")
+ax.set_title("Value Loss")
 fig.savefig(f"plots/{RUN_ID}/value_loss.png")
 
 # %%
@@ -379,20 +370,18 @@ for i in range(N_SAMPLES):
 
 # set gridlines to 1x1
 for ax in axs.flatten():
-    ax.set_xticks(np.arange(-.5, BOARD_SIDE_LEN, 1))
-    ax.set_yticks(np.arange(-.5, BOARD_SIDE_LEN, 1))
+    ax.set_xticks(np.arange(-.5, 9, 1))
+    ax.set_yticks(np.arange(-.5, 9, 1))
     ax.set_xticklabels([])
     ax.set_yticklabels([])
     ax.grid(True, color="grey", linewidth=0.5)
-
-fig.savefig(f"plots/{RUN_ID}/sample_predictions.png")
 
 # %%
 # export model to ONNX
 onnx_model_path = f"nets/{RUN_ID}-model.onnx"
 
 # create a dummy input
-dummy_input = tch.randn(1, INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN)
+dummy_input = tch.randn(1, 162)
 
 # export the model
 batch_axis = {0: "batch_size"}
@@ -417,7 +406,7 @@ print(f"PyTorch policy has shape {pytorch_policy.shape}")
 print(f"PyTorch value has shape {pytorch_value.shape}")
 print(f"x_sample has shape {common_input_data.shape}")
 for i in range(len(common_input_data)):
-    pytorch_policy[i] = clean_model_prediction(pytorch_policy[i].reshape(1, POLICY_DIMENSIONALITY), common_input_data[i].reshape(1, INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN))
+    pytorch_policy[i] = clean_model_prediction(pytorch_policy[i].reshape(1, 81), common_input_data[i].reshape(1, 162))
 pytorch_policy = tch.nn.functional.softmax(pytorch_policy, dim=1)
 pytorch_policy = pytorch_policy.detach().numpy()
 pytorch_value = pytorch_value.detach().numpy()
@@ -425,12 +414,12 @@ import onnxruntime as ort
 ort_session = ort.InferenceSession(onnx_model_path)
 onnx_net_output = []
 for i in range(len(common_input_data)):
-    input_thing = {"input": common_input_data[i].numpy().reshape(1, INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN)}
+    input_thing = {"input": common_input_data[i].numpy().reshape(1, 162)}
     ort_session_out = ort_session.run(None, input_thing)
     policy = ort_session_out[0]
-    np_policy = policy.reshape(1, POLICY_DIMENSIONALITY)
+    np_policy = policy.reshape(1, 81)
     tensor_policy = tch.tensor(np_policy)
-    policy = clean_model_prediction(tensor_policy, common_input_data[i].reshape(1, INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN))
+    policy = clean_model_prediction(tensor_policy, common_input_data[i].reshape(1, 162))
     policy = tch.nn.functional.softmax(policy, dim=1)
     onnx_net_output.append(policy)
 onnx_net_output = np.squeeze(np.array(onnx_net_output), axis=1)
