@@ -134,6 +134,44 @@ FINAL_CHANNELS = 128
 LATENT_REPR_DIM = FINAL_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN
 ATTENTION_POLICY_VECTOR_LENGTH = 32
 BODY_WIDTH = 128
+SE_CHANNELS = 16
+class ResidualBlock(tch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.relu = tch.nn.ReLU()
+        self.sigmoid = tch.nn.Sigmoid()
+        # Two 3x3 convolutions.
+        self.conv1 = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1)
+        self.conv2 = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1)
+        # SE layer, i.e.:
+        # - Global average pooling layer (FILTERS×7×7 to FILTERS)
+        # - Fully connected layer (FILTERS to SE_CHANNELS)
+        # - ReLU
+        # - Fully connected layer (SE_CHANNELS to 2×FILTERS).
+        # - 2×FILTERS is split into two FILTERS sized vectors W and B
+        # - Z = Sigmoid(W)
+        # - Output of the SE layer is (Z × input) + B.
+        self.global_avg_pool = tch.nn.AdaptiveAvgPool2d(1)
+        self.fc1 = tch.nn.Linear(BODY_WIDTH, SE_CHANNELS)
+        self.fc2 = tch.nn.Linear(SE_CHANNELS, 2 * BODY_WIDTH)
+
+    def forward(self, inp):
+        # perform two convolutions
+        x = self.relu(self.conv1(inp))
+        x = self.relu(self.conv2(x))
+        # SE layer
+        se = self.global_avg_pool(x).view(-1, BODY_WIDTH)
+        se = self.fc1(se)
+        se = self.relu(se)
+        se = self.fc2(se)
+        w = se[:, :BODY_WIDTH].view(-1, BODY_WIDTH, 1, 1)
+        b = se[:, BODY_WIDTH:].view(-1, BODY_WIDTH, 1, 1)
+        z = self.sigmoid(w)
+        # excitation:
+        x = (z * x) + b
+        # add residual
+        return x + inp
+
 class ConvPolicyModel(tch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -147,18 +185,13 @@ class ConvPolicyModel(tch.nn.Module):
         #########################################
         ####             TRUNK                ###
         #########################################
-        self.conv1   = tch.nn.Conv2d(INPUT_CHANNELS, BODY_WIDTH, 3, padding=1) # INPUT_CHANNELS x SIDE x SIDE -> 64 x SIDE x SIDE
-        self.conv2   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 64 x SIDE x SIDE -> 64 x SIDE x SIDE
-        self.conv3   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 64 x SIDE x SIDE -> 32 x SIDE x SIDE
-        self.conv4   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 32 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv5   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv6   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv7   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv8   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv9   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv10  = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv11  = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv12   = tch.nn.Conv2d(BODY_WIDTH, FINAL_CHANNELS, 3, padding=1) # 16 x SIDE x SIDE -> {FINAL_CHANNELS} x SIDE x SIDE
+        self.input_conv   = tch.nn.Conv2d(INPUT_CHANNELS, BODY_WIDTH, 3, padding=1) # INPUT_CHANNELS x SIDE x SIDE -> 64 x SIDE x SIDE
+        self.block1  = ResidualBlock()
+        self.block2  = ResidualBlock()
+        self.block3  = ResidualBlock()
+        self.block4  = ResidualBlock()
+        self.block5  = ResidualBlock()
+        self.trunk_end   = tch.nn.Conv2d(BODY_WIDTH, FINAL_CHANNELS, 3, padding=1) # 16 x SIDE x SIDE -> {FINAL_CHANNELS} x SIDE x SIDE
         #########################################
         ###           POLICY HEAD             ###
         #########################################
@@ -194,22 +227,17 @@ class ConvPolicyModel(tch.nn.Module):
 
         # initial transformation
         x = x.view(-1, INPUT_CHANNELS, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
-        x = self.relu(self.conv1(x))
+        x = self.relu(self.input_conv(x))
 
         # residual trunk
-        t = self.relu(self.conv2(x))
-        x = self.relu(self.conv3(t)) + x
-        t = self.relu(self.conv4(x))
-        x = self.relu(self.conv5(t)) + x
-        t = self.relu(self.conv6(x))
-        x = self.relu(self.conv7(t)) + x
-        t = self.relu(self.conv8(x))
-        x = self.relu(self.conv9(t)) + x
-        t = self.relu(self.conv10(x))
-        x = self.relu(self.conv11(t)) + x
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.block4(x)
+        x = self.block5(x)
 
         # latent representation used by all heads
-        latent = self.relu(self.conv12(x))
+        latent = self.relu(self.trunk_end(x))
 
         #########################################
         ###           POLICY HEAD             ###
@@ -252,7 +280,7 @@ class ConvPolicyModel(tch.nn.Module):
 # %%
 # create the model and optimizer
 model = ConvPolicyModel()
-optimizer = tch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
+optimizer = tch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.03)
 
 # create a loss function to match the probability distribution
 def loss_fn(prediction_logits, target_distribution):
@@ -328,7 +356,7 @@ def train(model, optimizer, train_loader, val_loader, epochs=20, device="cpu"):
             total_batch_idx = epoch * len(train_loader) + batch_idx
             losses.append((total_batch_idx, loss_value, policy_loss_value, value_loss_value))
             if batch_idx % 256 == 0:
-                print(f"Training batch {batch_idx}/{len(train_loader)}: loss {loss_value}, policy loss {policy_loss_value}, value loss {value_loss_value}")
+                print(f"Training batch {batch_idx}/{len(train_loader)}: loss {loss_value:.7f}, policy loss {policy_loss_value:.7f}, value loss {value_loss_value:.7f}")
                 val_policy_loss = 0.0
                 val_value_loss = 0.0
                 val_loss = 0.0
@@ -348,7 +376,7 @@ def train(model, optimizer, train_loader, val_loader, epochs=20, device="cpu"):
                     val_value_loss /= len(val_loader)
                     val_loss /= len(val_loader)
                     val_losses.append((total_batch_idx, val_loss, val_policy_loss, val_value_loss))
-                    print(f"Validation loss {val_loss}, policy loss {val_policy_loss}, value loss {val_value_loss}")
+                    print(f"               Validation loss {val_loss:.7f}, policy loss {val_policy_loss:.7f}, value loss {val_value_loss:.7f}")
                 model.train()
     return losses, val_losses
 
