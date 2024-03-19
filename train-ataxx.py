@@ -41,7 +41,7 @@ print(f"y has dims {rollout_counts.shape}")
 print(f"{rollout_counts[0]}")
 
 # split the dataset into training and validation sets
-split = int(len(positions) * 0.9)
+split = int(len(positions) * 0.95)
 x_train = positions[:split]
 y_train = rollout_counts[:split]
 z_train = results[:split]
@@ -91,8 +91,8 @@ class AtaxxDataset(tch.utils.data.Dataset):
 # create dataloaders
 train_dataset = AtaxxDataset(x_train, y_train, z_train)
 val_dataset = AtaxxDataset(x_val, y_val, z_val)
-train_loader = tch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
-val_loader = tch.utils.data.DataLoader(val_dataset, batch_size=64, shuffle=True)
+train_loader = tch.utils.data.DataLoader(train_dataset, batch_size=64)
+val_loader = tch.utils.data.DataLoader(val_dataset, batch_size=64)
 
 # %%
 x_shaped = x_train.reshape(-1, INPUT_CHANNELS, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
@@ -130,89 +130,129 @@ SQUARES = BOARD_SIDE_LEN * BOARD_SIDE_LEN
 # define a convolutional model
 # this is ever so slightly more complicated than the previous model
 # as we need to reshape the input to be 4-dimensional
-FINAL_CHANNELS = 32
+FINAL_CHANNELS = 128
 LATENT_REPR_DIM = FINAL_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN
-ATTENTION_POLICY_VECTOR_LENGTH = 16
+ATTENTION_POLICY_VECTOR_LENGTH = 32
+BODY_WIDTH = 128
 class ConvPolicyModel(tch.nn.Module):
     def __init__(self):
         super().__init__()
         self.relu    = tch.nn.ReLU()
+        # replace ReLU with an activation function that doesn't kill gradients
+        # self.relu    = tch.nn.Mish()
         self.sigmoid = tch.nn.Sigmoid()
         # five layers of 3x3 convs mean that information can travel at most five squares away.
         # this is maybe fine idk
-        self.conv1   = tch.nn.Conv2d(INPUT_CHANNELS, 32, 3, padding=1) # INPUT_CHANNELS x SIDE x SIDE -> 64 x SIDE x SIDE
-        self.conv2   = tch.nn.Conv2d(32, 32, 3, padding=1) # 64 x SIDE x SIDE -> 64 x SIDE x SIDE
-        self.conv3   = tch.nn.Conv2d(32, 32, 3, padding=1) # 64 x SIDE x SIDE -> 32 x SIDE x SIDE
-        self.conv4   = tch.nn.Conv2d(32, 32, 3, padding=1) # 32 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv5   = tch.nn.Conv2d(32, 32, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv6   = tch.nn.Conv2d(32, 32, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
-        self.conv7   = tch.nn.Conv2d(32, FINAL_CHANNELS, 3, padding=1) # 16 x SIDE x SIDE -> {FINAL_CHANNELS} x SIDE x SIDE
-        self.policy1 = tch.nn.Linear(LATENT_REPR_DIM, LATENT_REPR_DIM)
-        self.policy_src = tch.nn.Linear(LATENT_REPR_DIM, BOARD_SIDE_LEN * BOARD_SIDE_LEN * ATTENTION_POLICY_VECTOR_LENGTH)
-        self.policy_tgt = tch.nn.Linear(LATENT_REPR_DIM, BOARD_SIDE_LEN * BOARD_SIDE_LEN * ATTENTION_POLICY_VECTOR_LENGTH)
-        self.value1  = tch.nn.Linear(LATENT_REPR_DIM, 2 * SQUARES)
-        self.value2  = tch.nn.Linear(2 * SQUARES, 1)
 
-    @staticmethod
-    def attention_policy_src_tgt_merge(A, B):
-        # Reshape A to [batch_size, n, 1, m]
-        A = A.unsqueeze(2)
+        #########################################
+        ####             TRUNK                ###
+        #########################################
+        self.conv1   = tch.nn.Conv2d(INPUT_CHANNELS, BODY_WIDTH, 3, padding=1) # INPUT_CHANNELS x SIDE x SIDE -> 64 x SIDE x SIDE
+        self.conv2   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 64 x SIDE x SIDE -> 64 x SIDE x SIDE
+        self.conv3   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 64 x SIDE x SIDE -> 32 x SIDE x SIDE
+        self.conv4   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 32 x SIDE x SIDE -> 16 x SIDE x SIDE
+        self.conv5   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
+        self.conv6   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
+        self.conv7   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
+        self.conv8   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
+        self.conv9   = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
+        self.conv10  = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
+        self.conv11  = tch.nn.Conv2d(BODY_WIDTH, BODY_WIDTH, 3, padding=1) # 16 x SIDE x SIDE -> 16 x SIDE x SIDE
+        self.conv12   = tch.nn.Conv2d(BODY_WIDTH, FINAL_CHANNELS, 3, padding=1) # 16 x SIDE x SIDE -> {FINAL_CHANNELS} x SIDE x SIDE
+        #########################################
+        ###           POLICY HEAD             ###
+        #########################################
+        self.policy1 = tch.nn.Conv2d(FINAL_CHANNELS, FINAL_CHANNELS // 2, 1) # {FINAL_CHANNELS} x SIDE x SIDE -> {FINAL_CHANNELS} x SIDE x SIDE
+        self.policy_src = tch.nn.Conv2d(FINAL_CHANNELS // 2, ATTENTION_POLICY_VECTOR_LENGTH, 1)
+        self.policy_tgt = tch.nn.Conv2d(FINAL_CHANNELS // 2, ATTENTION_POLICY_VECTOR_LENGTH, 1)
+        #########################################
+        ###        SOFT POLICY HEAD           ###
+        #########################################
+        self.soft_policy1 = tch.nn.Conv2d(FINAL_CHANNELS, FINAL_CHANNELS // 2, 1) # {FINAL_CHANNELS} x SIDE x SIDE -> {FINAL_CHANNELS} x SIDE x SIDE
+        self.soft_policy_src = tch.nn.Conv2d(FINAL_CHANNELS // 2, ATTENTION_POLICY_VECTOR_LENGTH, 1)
+        self.soft_policy_tgt = tch.nn.Conv2d(FINAL_CHANNELS // 2, ATTENTION_POLICY_VECTOR_LENGTH, 1)
+        #########################################
+        ###            VALUE HEAD             ###
+        #########################################
+        self.value1  = tch.nn.Conv2d(FINAL_CHANNELS, 1, 1) # {FINAL_CHANNELS} x SIDE x SIDE -> 1 x SIDE x SIDE
+        self.value2  = tch.nn.Linear(SQUARES, 1)
 
-        # Reshape B to [batch_size, 1, m, n]
-        B = B.transpose(1, 2).unsqueeze(1)
-
-        # Compute the dot product
-        C = tch.matmul(A, B)
-
-        # view will just obliterate the unit dimension for me
-        return C.view(-1, BOARD_SIDE_LEN * BOARD_SIDE_LEN * BOARD_SIDE_LEN * BOARD_SIDE_LEN)
+        # initialize the weights
+        for m in self.modules():
+            if isinstance(m, tch.nn.Conv2d):
+                tch.nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    tch.nn.init.zeros_(m.bias)
+            elif isinstance(m, tch.nn.Linear):
+                tch.nn.init.xavier_uniform_(m.weight)
+                tch.nn.init.zeros_(m.bias)
 
     def forward(self, x):
+        #########################################
+        ###              TRUNK                ###
+        #########################################
+
+        # initial transformation
         x = x.view(-1, INPUT_CHANNELS, BOARD_SIDE_LEN, BOARD_SIDE_LEN)
         x = self.relu(self.conv1(x))
-        # conv2 through conv7 have equal I/O dimensions,
-        # so we can make them residual.
-        x = self.relu(self.conv2(x)) + x
-        x = self.relu(self.conv3(x)) + x
-        x = self.relu(self.conv4(x)) + x
-        x = self.relu(self.conv5(x)) + x
-        x = self.relu(self.conv6(x)) + x
-        x = self.relu(self.conv7(x)) + x
-        # flatten
-        latent = x.view(-1, LATENT_REPR_DIM)
-        x = self.policy1(latent)
-        x = self.relu(x)
 
-        src = self.policy_src(x).view(-1, BOARD_SIDE_LEN * BOARD_SIDE_LEN, ATTENTION_POLICY_VECTOR_LENGTH)
-        tgt = self.policy_tgt(x).view(-1, BOARD_SIDE_LEN * BOARD_SIDE_LEN, ATTENTION_POLICY_VECTOR_LENGTH)
+        # residual trunk
+        t = self.relu(self.conv2(x))
+        x = self.relu(self.conv3(t)) + x
+        t = self.relu(self.conv4(x))
+        x = self.relu(self.conv5(t)) + x
+        t = self.relu(self.conv6(x))
+        x = self.relu(self.conv7(t)) + x
+        t = self.relu(self.conv8(x))
+        x = self.relu(self.conv9(t)) + x
+        t = self.relu(self.conv10(x))
+        x = self.relu(self.conv11(t)) + x
+
+        # latent representation used by all heads
+        latent = self.relu(self.conv12(x))
+
+        #########################################
+        ###           POLICY HEAD             ###
+        #########################################
+        x = self.relu(self.policy1(latent))
+        src = self.policy_src(x)
+        tgt = self.policy_tgt(x)
+        src = src.reshape(-1, ATTENTION_POLICY_VECTOR_LENGTH, 7 * 7)
+        tgt = tgt.reshape(-1, ATTENTION_POLICY_VECTOR_LENGTH, 7 * 7)
         # to get the policy for a certain source-target pair, we take the dot product of the source vector and the target vector.
         # this gives us a 7x7x7x7 tensor.
-        policy_logits = self.attention_policy_src_tgt_merge(src, tgt)
+        src = src.transpose(1, 2)
+        policy_logits = (src @ tgt).view(-1, BOARD_SIDE_LEN * BOARD_SIDE_LEN * BOARD_SIDE_LEN * BOARD_SIDE_LEN)
 
-        # run the value head
-        x = self.value1(latent)
-        x = self.relu(x)
-        x = self.value2(x)
-        value = self.sigmoid(x)
-        return policy_logits, value
+        #########################################
+        ###         SOFT POLICY HEAD          ###
+        #########################################
+        # only run the soft policy head during training:
+        if self.training:
+            x = self.relu(self.soft_policy1(latent))
+            soft_src = self.soft_policy_src(x)
+            soft_tgt = self.soft_policy_tgt(x)
+            soft_src = soft_src.reshape(-1, ATTENTION_POLICY_VECTOR_LENGTH, 7 * 7)
+            soft_tgt = soft_tgt.reshape(-1, ATTENTION_POLICY_VECTOR_LENGTH, 7 * 7)
+            soft_src = soft_src.transpose(1, 2)
+            soft_policy_logits = (soft_src @ soft_tgt).view(-1, BOARD_SIDE_LEN * BOARD_SIDE_LEN * BOARD_SIDE_LEN * BOARD_SIDE_LEN)
 
-class SimpleNet(tch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.sigmoid = tch.nn.Sigmoid()
-        self.policy  = tch.nn.Linear(INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN, POLICY_DIMENSIONALITY)
-        self.value   = tch.nn.Linear(INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN, 1)
+        #########################################
+        ###            VALUE HEAD             ###
+        #########################################
+        x = self.value1(latent).view(-1, SQUARES)
+        value = self.sigmoid(self.value2(x))
 
-    def forward(self, x):
-        policy_logits = self.policy(x)
-        value = self.sigmoid(self.value(x))
-        return policy_logits, value
+        if self.training:
+            return policy_logits, value, soft_policy_logits
+        else:
+            return policy_logits, value
 
 
 # %%
 # create the model and optimizer
 model = ConvPolicyModel()
-optimizer = tch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.1)
+optimizer = tch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
 
 # create a loss function to match the probability distribution
 def loss_fn(prediction_logits, target_distribution):
@@ -223,11 +263,14 @@ def mask_illegal_moves(model_prediction, board):
     # we just no-op because we don't have ataxx movegen in python atm
     return model_prediction
 
-POLICY_SOFTMAX_TEMP = 1.3
-def clean_model_prediction(model_prediction, board):
+POLICY_SOFTMAX_TEMP = 1.2
+POLICY_SOFTMAX_TEMP_SOFT_POLICY_HEAD = 4.0
+def clean_model_prediction(model_prediction, soft_model_prediction, board):
     model_prediction = mask_illegal_moves(model_prediction, board)
+    soft_model_prediction = mask_illegal_moves(soft_model_prediction, board)
     model_prediction = model_prediction * POLICY_SOFTMAX_TEMP
-    return model_prediction
+    soft_model_prediction = soft_model_prediction * POLICY_SOFTMAX_TEMP_SOFT_POLICY_HEAD
+    return model_prediction, soft_model_prediction
 
 def decompose_model_prediction(model_prediction):
     # takes the 7x7x7x7 element model prediction and gives a from-map and a to-map, each of which are only 7x7
@@ -265,14 +308,17 @@ def train(model, optimizer, train_loader, val_loader, epochs=20, device="cpu"):
         print(f"Epoch {epoch+1}")
         model.train()
         for batch_idx, (board_state, search_policy, game_outcome) in enumerate(train_loader):
+            # convert search_policy from float16 to float32
+            search_policy = search_policy.to(tch.float32)
             board_state = board_state.to(device)
             search_policy = search_policy.to(device)
             optimizer.zero_grad()
-            raw_policy, value = model(board_state)
-            masked_policy = clean_model_prediction(raw_policy, board_state)
+            raw_policy, value, soft_raw_policy = model(board_state)
+            masked_policy, soft_masked_policy = clean_model_prediction(raw_policy, soft_raw_policy, board_state)
             policy_loss = loss_fn(masked_policy, search_policy)
+            soft_policy_loss = loss_fn(soft_masked_policy, search_policy)
             value_loss = tch.nn.functional.mse_loss(value.view(-1), game_outcome)
-            loss = policy_loss + value_loss
+            loss = policy_loss + value_loss + soft_policy_loss
             loss.backward()
             tch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
@@ -283,33 +329,33 @@ def train(model, optimizer, train_loader, val_loader, epochs=20, device="cpu"):
             losses.append((total_batch_idx, loss_value, policy_loss_value, value_loss_value))
             if batch_idx % 256 == 0:
                 print(f"Training batch {batch_idx}/{len(train_loader)}: loss {loss_value}, policy loss {policy_loss_value}, value loss {value_loss_value}")
-        val_policy_loss = 0.0
-        val_value_loss = 0.0
-        val_loss = 0.0
-        model.eval()
-        with tch.no_grad():
-            for batch_idx, (board_state, search_policy, game_outcome) in enumerate(val_loader):
-                board_state = board_state.to(device)
-                search_policy = search_policy.to(device)
-                raw_policy, value = model(board_state)
-                masked_policy = clean_model_prediction(raw_policy, board_state)
-                policy_loss = loss_fn(masked_policy, search_policy)
-                value_loss = tch.nn.functional.mse_loss(value.view(-1), game_outcome)
-                val_policy_loss += policy_loss.item()
-                val_value_loss += value_loss.item()
-                val_loss += (policy_loss + value_loss).item()
-            val_policy_loss /= len(val_loader)
-            val_value_loss /= len(val_loader)
-            val_loss /= len(val_loader)
-            total_batch_idx = (epoch + 1) * len(train_loader)
-            val_losses.append((total_batch_idx, val_loss, val_policy_loss, val_value_loss))
-            print(f"Validation loss {val_loss}, policy loss {val_policy_loss}, value loss {val_value_loss}")
+                val_policy_loss = 0.0
+                val_value_loss = 0.0
+                val_loss = 0.0
+                model.eval()
+                with tch.no_grad():
+                    for batch_idx, (board_state, search_policy, game_outcome) in enumerate(val_loader):
+                        board_state = board_state.to(device)
+                        search_policy = search_policy.to(device)
+                        raw_policy, value = model(board_state)
+                        masked_policy, _ = clean_model_prediction(raw_policy, raw_policy, board_state)
+                        policy_loss = loss_fn(masked_policy, search_policy)
+                        value_loss = tch.nn.functional.mse_loss(value.view(-1), game_outcome)
+                        val_policy_loss += policy_loss.item()
+                        val_value_loss += value_loss.item()
+                        val_loss += (policy_loss + value_loss).item()
+                    val_policy_loss /= len(val_loader)
+                    val_value_loss /= len(val_loader)
+                    val_loss /= len(val_loader)
+                    val_losses.append((total_batch_idx, val_loss, val_policy_loss, val_value_loss))
+                    print(f"Validation loss {val_loss}, policy loss {val_policy_loss}, value loss {val_value_loss}")
+                model.train()
     return losses, val_losses
 
 # %%
 # train the model
 # print(f"Training on device {tch.cuda.get_device_name(0)}")
-loss_trace, val_loss_trace = train(model, optimizer, train_loader, val_loader, epochs=10)
+loss_trace, val_loss_trace = train(model, optimizer, train_loader, val_loader, epochs=2)
 
 # %%
 # plot the loss trace and validation loss trace
@@ -384,7 +430,7 @@ rand_idx = np.random.randint(len(val_dataset), size=N_SAMPLES)
 x_sample = x_val[rand_idx]
 y_sample = y_val[rand_idx]
 y_pred_raw, value = model(x_sample)
-y_pred = clean_model_prediction(y_pred_raw, x_sample)
+y_pred, _ = clean_model_prediction(y_pred_raw, y_pred_raw, x_sample)
 # apply softmax to get a probability distribution
 y_pred = tch.nn.functional.softmax(y_pred, dim=1)
 
@@ -493,7 +539,8 @@ print(f"PyTorch policy has shape {pytorch_policy.shape}")
 print(f"PyTorch value has shape {pytorch_value.shape}")
 print(f"x_sample has shape {common_input_data.shape}")
 for i in range(len(common_input_data)):
-    pytorch_policy[i] = clean_model_prediction(pytorch_policy[i].reshape(1, POLICY_DIMENSIONALITY), common_input_data[i].reshape(1, INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN))
+    t, _ = clean_model_prediction(pytorch_policy[i].reshape(1, POLICY_DIMENSIONALITY), pytorch_policy[i].reshape(1, POLICY_DIMENSIONALITY), common_input_data[i].reshape(1, INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN))
+    pytorch_policy[i] = t
 pytorch_policy = tch.nn.functional.softmax(pytorch_policy, dim=1)
 pytorch_policy = pytorch_policy.detach().numpy()
 pytorch_value = pytorch_value.detach().numpy()
@@ -506,7 +553,7 @@ for i in range(len(common_input_data)):
     policy = ort_session_out[0]
     np_policy = policy.reshape(1, POLICY_DIMENSIONALITY)
     tensor_policy = tch.tensor(np_policy)
-    policy = clean_model_prediction(tensor_policy, common_input_data[i].reshape(1, INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN))
+    policy, _ = clean_model_prediction(tensor_policy, tensor_policy, common_input_data[i].reshape(1, INPUT_CHANNELS * BOARD_SIDE_LEN * BOARD_SIDE_LEN))
     policy = tch.nn.functional.softmax(policy, dim=1)
     onnx_net_output.append(policy)
 onnx_net_output = np.squeeze(np.array(onnx_net_output), axis=1)

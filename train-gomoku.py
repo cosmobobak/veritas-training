@@ -41,7 +41,7 @@ print(f"y has dims {rollout_counts.shape}")
 print(f"{rollout_counts[0]}")
 
 # split the dataset into training and validation sets
-split = int(len(positions) * 0.9)
+split = int(len(positions) * 0.95)
 x_train = positions[:split]
 y_train = rollout_counts[:split]
 z_train = results[:split]
@@ -199,7 +199,17 @@ def loss_fn(prediction_logits, target_distribution):
 
 # create a function for masking off illegal moves
 def mask_illegal_moves(model_prediction, board):
-    # we just no-op because we don't have ataxx movegen in python atm
+    # return model_prediction
+    # model_prediction is an {SQUARES}-element vector of probabilities
+    # board is a (SQUARES * 2)-element vector of occupancies
+    # we need to set all illegal moves to 0,
+    # and then renormalize the probabilities
+    # so that they sum to 1 again
+    # first, get a mask of all illegal moves
+    illegal_moves = board[:, :SQUARES] + board[:, SQUARES:]
+    # now set all illegal moves to -inf
+    # model_prediction = tch.where(illegal_moves != 0, tch.zeros_like(model_prediction), model_prediction)
+    model_prediction = model_prediction - 1e9 * illegal_moves
     return model_prediction
 
 POLICY_SOFTMAX_TEMP = 1.3
@@ -234,33 +244,33 @@ def train(model, optimizer, train_loader, val_loader, epochs=20, device="cpu"):
             losses.append((total_batch_idx, loss_value, policy_loss_value, value_loss_value))
             if batch_idx % 256 == 0:
                 print(f"Training batch {batch_idx}/{len(train_loader)}: loss {loss_value}, policy loss {policy_loss_value}, value loss {value_loss_value}")
-        val_policy_loss = 0.0
-        val_value_loss = 0.0
-        val_loss = 0.0
-        model.eval()
-        with tch.no_grad():
-            for batch_idx, (board_state, search_policy, game_outcome) in enumerate(val_loader):
-                board_state = board_state.to(device)
-                search_policy = search_policy.to(device)
-                raw_policy, value = model(board_state)
-                masked_policy = clean_model_prediction(raw_policy, board_state)
-                policy_loss = loss_fn(masked_policy, search_policy)
-                value_loss = tch.nn.functional.mse_loss(value.view(-1), game_outcome)
-                val_policy_loss += policy_loss.item()
-                val_value_loss += value_loss.item()
-                val_loss += (policy_loss + value_loss).item()
-            val_policy_loss /= len(val_loader)
-            val_value_loss /= len(val_loader)
-            val_loss /= len(val_loader)
-            total_batch_idx = (epoch + 1) * len(train_loader)
-            val_losses.append((total_batch_idx, val_loss, val_policy_loss, val_value_loss))
-            print(f"Validation loss {val_loss}, policy loss {val_policy_loss}, value loss {val_value_loss}")
+                val_policy_loss = 0.0
+                val_value_loss = 0.0
+                val_loss = 0.0
+                model.eval()
+                with tch.no_grad():
+                    for batch_idx, (board_state, search_policy, game_outcome) in enumerate(val_loader):
+                        board_state = board_state.to(device)
+                        search_policy = search_policy.to(device)
+                        raw_policy, value = model(board_state)
+                        masked_policy = clean_model_prediction(raw_policy, board_state)
+                        policy_loss = loss_fn(masked_policy, search_policy)
+                        value_loss = tch.nn.functional.mse_loss(value.view(-1), game_outcome)
+                        val_policy_loss += policy_loss.item()
+                        val_value_loss += value_loss.item()
+                        val_loss += (policy_loss + value_loss).item()
+                    val_policy_loss /= len(val_loader)
+                    val_value_loss /= len(val_loader)
+                    val_loss /= len(val_loader)
+                    val_losses.append((total_batch_idx, val_loss, val_policy_loss, val_value_loss))
+                    print(f"Validation loss {val_loss}, policy loss {val_policy_loss}, value loss {val_value_loss}")
+                model.train()
     return losses, val_losses
 
 # %%
 # train the model
 # print(f"Training on device {tch.cuda.get_device_name(0)}")
-loss_trace, val_loss_trace = train(model, optimizer, train_loader, val_loader, epochs=10)
+loss_trace, val_loss_trace = train(model, optimizer, train_loader, val_loader, epochs=1)
 
 # %%
 # plot the loss trace and validation loss trace
